@@ -179,12 +179,13 @@ module Grape
         @status = status
       else
         return @status if @status
-        case request.request_method.to_s.upcase
-          when 'POST'
-            201
-          else
-            200
-        end
+        # case request.request_method.to_s.upcase
+        #   when 'POST'
+        #     201
+        #   else
+        #     200
+        # end
+        200
       end
     end
 
