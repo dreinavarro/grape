@@ -159,7 +159,7 @@ module Grape
     def redirect(url, options = {})
       merged_options = {:permanent => false }.merge(options)
       if merged_options[:permanent]
-        status 304
+        status 301
       else
         if env['HTTP_VERSION'] == 'HTTP/1.1' && request.request_method.to_s.upcase != "GET"
           status 303
@@ -300,6 +300,8 @@ module Grape
         validator.validate!(params)
       end
 
+      run_filters after_validations
+
       response_text = instance_eval &self.block
       run_filters afters
       cookies.write(header)
@@ -373,6 +375,7 @@ module Grape
     end
 
     def befores; aggregate_setting(:befores) end
+    def after_validations; aggregate_setting(:after_validations) end
     def afters; aggregate_setting(:afters) end
   end
 end
