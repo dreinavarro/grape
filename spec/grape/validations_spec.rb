@@ -27,6 +27,11 @@ describe Grape::Validations do
         last_response.status.should == 200
         last_response.body.should == 'optional works!'
       end
+
+      it 'adds to declared parameters' do
+        subject.params { optional :some_param }
+        subject.settings[:declared_params].should == [:some_param]
+      end
     end
 
     context 'required' do
@@ -46,23 +51,28 @@ describe Grape::Validations do
         last_response.status.should == 200
         last_response.body.should == 'required works'
       end
+
+      it 'adds to declared parameters' do
+        subject.params { requires :some_param }
+        subject.settings[:declared_params].should == [:some_param]
+      end
     end
 
     context 'custom validation' do
-      module CustomValidations  
+      module CustomValidations
         class Customvalidator < Grape::Validations::Validator
           def validate_param!(attr_name, params)
             unless params[attr_name] == 'im custom'
               throw :error, :status => 400, :message => "#{attr_name}: is not custom!"
-            end    
+            end
           end
-        end  
-      end     
+        end
+      end
 
       context 'when using optional with a custom validator' do
         before do
           subject.params { optional :custom, :customvalidator => true }
-          subject.get '/optional_custom' do 'optional with custom works!'; end 
+          subject.get '/optional_custom' do 'optional with custom works!'; end
         end
 
         it 'validates when param is present' do
@@ -83,7 +93,7 @@ describe Grape::Validations do
 
         it 'validates with custom validator when param present and incorrect type' do
           subject.params { optional :custom, :type => String, :customvalidator => true }
-      
+
           get '/optional_custom', { :custom => 123 }
           last_response.status.should == 400
           last_response.body.should == 'custom: is not custom!'
@@ -110,6 +120,64 @@ describe Grape::Validations do
           get '/required_custom'
           last_response.status.should == 400
           last_response.body.should == 'missing parameter: custom'
+        end
+
+        context 'nested namespaces' do
+          before do
+            subject.params { requires :custom, :customvalidator => true }
+            subject.namespace 'nested' do
+              get 'one' do 'validation failed' end
+              namespace 'nested' do
+                get 'two' do 'validation failed' end
+              end
+            end
+            subject.namespace 'peer' do
+              get 'one' do 'no validation required' end
+              namespace 'nested' do
+                get 'two' do 'no validation required' end
+              end
+            end
+
+            subject.namespace 'unrelated' do
+              params{ requires :name }
+              get 'one' do 'validation required'; end
+
+              namespace 'double' do
+                get 'two' do 'no validation required' end
+              end
+            end
+          end
+          
+          specify 'the parent namespace should use the validator' do
+            get '/nested/one', { :custom => 'im wrong, validate me'}
+            last_response.status.should == 400
+            last_response.body.should == 'custom: is not custom!'
+          end
+          
+          specify 'the nested namesapce should inherit the custom validator' do
+            get '/nested/nested/two', { :custom => 'im wrong, validate me'}
+            last_response.status.should == 400
+            last_response.body.should == 'custom: is not custom!'
+          end
+          
+          specify 'peer namesapces should not have the validator' do
+            get '/peer/one', { :custom => 'im not validated' }
+            last_response.status.should == 200
+            last_response.body.should == 'no validation required'
+          end
+
+          specify 'namespaces nested in peers should also not have the validator' do
+            get '/peer/nested/two', { :custom => 'im not validated' }
+            last_response.status.should == 200
+            last_response.body.should == 'no validation required'
+          end
+
+          specify 'when nested, specifying a route should clear out the validations for deeper nested params' do
+            get '/unrelated/one'
+            last_response.status.should == 400
+            get '/unrelated/double/two'
+            last_response.status.should == 200
+          end
         end
       end
     end # end custom validation

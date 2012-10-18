@@ -8,7 +8,7 @@ providing a simple DSL to easily develop RESTful APIs. It has built-in support
 for common conventions, including multiple formats, subdomain/prefix restriction, 
 content negotiation, versioning and much more.
 
-[![Build Status](http://travis-ci.org/intridea/grape.png?branch=master)](http://travis-ci.org/intridea/grape)
+[![Build Status](https://travis-ci.org/intridea/grape.png?branch=master)](http://travis-ci.org/intridea/grape)
 
 ## Project Tracking
 
@@ -17,8 +17,8 @@ content negotiation, versioning and much more.
 
 ## Stable Release
 
-You're reading the documentation for the next release of Grape.
-The current stable release is [0.2.1](https://github.com/intridea/grape/blob/v0.2.1/README.markdown).
+You're reading the documentation for the next release of Grape, which should be 0.2.3.
+The current stable release is [0.2.2](https://github.com/intridea/grape/blob/v0.2.2/README.markdown).
 
 ## Installation
 
@@ -116,6 +116,9 @@ In a Rails application, modify *config/routes*:
 mount Twitter::API => "/"
 ```
 
+Note that you will need to restart Rails to pick up changes in your API classes
+(see [Issue 131](https://github.com/intridea/grape/issues/131)).
+
 ### Modules
 
 You can mount multiple API implementations inside another one. These don't have to be
@@ -131,12 +134,12 @@ end
 ## Versioning
 
 There are three strategies in which clients can reach your API's endpoints: `:header`, 
-`:path` and `:param`. The default strategy is `:header`.
+`:path` and `:param`. The default strategy is `:path`.
 
 ### Header
 
 ```ruby
-version 'v1', :using => :header
+version 'v1', :using => :header, :vendor => 'twitter'
 ```
 
 Using this versioning strategy, clients should pass the desired version in the HTTP `Accept` head.
@@ -145,7 +148,7 @@ Using this versioning strategy, clients should pass the desired version in the H
 
 By default, the first matching version is used when no `Accept` header is
 supplied. This behavior is similar to routing in Rails. To circumvent this default behavior,
-one could use the `:strict` option. When this option is set to `true`, a `404 Not found` error
+one could use the `:strict` option. When this option is set to `true`, a `406 Not Acceptable` error
 is returned when no correct `Accept` header is supplied.
 
 ### Path
@@ -411,6 +414,50 @@ redirect "/new_url"
 redirect "/new_url", :permanent => true
 ```
 
+## Allowed Methods
+
+When you add a route for a resource, a route for the HTTP OPTIONS
+method will also be added. The response to an OPTIONS request will
+include an Allow header listing the supported methods.
+
+``` ruby
+class API < Grape::API
+  get '/counter' do
+    { :counter => Counter.count }
+  end
+
+  params do
+    requires :value, :type => Integer, :desc => 'value to add to counter'
+  end
+  put '/counter' do
+    { :counter => Counter.incr(params.value) }
+  end
+end
+```
+
+``` shell
+curl -v -X OPTIONS http://localhost:3000/counter 
+
+> OPTIONS /counter HTTP/1.1
+> 
+< HTTP/1.1 204 No Content
+< Allow: OPTIONS, GET, PUT
+```
+
+
+If a request for a resource is made with an unsupported HTTP method, an
+HTTP 405 (Method Not Allowed) response will be returned.
+
+``` shell
+curl -X DELETE -v http://localhost:3000/counter/
+
+> DELETE /counter/ HTTP/1.1
+> Host: localhost:3000
+> 
+< HTTP/1.1 405 Method Not Allowed
+< Allow: OPTIONS, GET, PUT
+```
+
 ## Raising Exceptions
 
 You can abort the execution of an API method by raising errors with `error!`.
@@ -560,6 +607,11 @@ You can also set the default format. The order for choosing the format is the fo
 ``` ruby
 class Twitter::API < Grape::API
   format :json
+end
+```
+
+``` ruby
+class Twitter::API < Grape::API
   default_format :json
 end
 ```
