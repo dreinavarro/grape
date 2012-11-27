@@ -189,6 +189,53 @@ describe Grape::API do
       last_response.body.should eql 'Created a Vote'
     end
 
+    describe "root routes should work with" do
+      before do
+        def subject.enable_root_route!
+          self.get("/") {"root"}
+        end
+      end
+
+      after do
+        last_response.body.should eql 'root'
+      end
+
+      describe "path versioned APIs" do
+        before do
+          subject.version 'v1', :using => :path
+          subject.enable_root_route!
+        end
+
+        it "without a format" do
+          versioned_get "/", "v1", :using => :path
+        end
+
+        it "with a format" do
+          get "/v1/.json"
+        end
+      end
+
+      it "header versioned APIs" do
+        subject.version 'v1', :using => :header, :vendor => 'test'
+        subject.enable_root_route!
+
+        versioned_get "/", "v1", :using => :header
+      end
+
+      it "param versioned APIs" do
+        subject.version 'v1', :using => :param
+        subject.enable_root_route!
+
+        versioned_get "/", "v1", :using => :param
+      end
+
+      it "unversioned APIs" do
+        subject.enable_root_route!
+
+        get "/"
+      end
+    end
+
     it 'should allow for multiple paths' do
       subject.get(["/abc", "/def"]) do
         "foo"
@@ -896,6 +943,26 @@ describe Grape::API do
       end
       get '/content'
       last_response.content_type.should == "text/javascript"
+    end
+  end
+
+  describe ".formatter" do
+    context "multiple formatters" do
+      before :each do
+        subject.formatter :json, lambda { |object| "{\"custom_formatter\":\"#{object[:some]}\"}" }
+        subject.formatter :txt, lambda { |object| "custom_formatter: #{object[:some]}" }
+        subject.get :simple do
+          {:some => 'hash'}
+        end
+      end
+      it 'sets one formatter' do
+        get '/simple.json'
+        last_response.body.should eql '{"custom_formatter":"hash"}'
+      end
+      it 'sets another formatter' do
+        get '/simple.txt'
+        last_response.body.should eql 'custom_formatter: hash'
+      end
     end
   end
 

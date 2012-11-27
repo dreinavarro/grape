@@ -11,9 +11,37 @@ module Grape
     attr_accessor :block, :options, :settings
     attr_reader :env, :request
 
+    class << self
+      # @api private
+      #
+      # Create an UnboundMethod that is appropriate for executing an endpoint
+      # route.
+      #
+      # The unbound method allows explicit calls to +return+ without raising a
+      # +LocalJumpError+. The method will be removed, but a +Proc+ reference to
+      # it will be returned. The returned +Proc+ expects a single argument: the
+      # instance of +Endpoint+ to bind to the method during the call.
+      #
+      # @param [String, Symbol] method_name
+      # @return [Proc]
+      # @raise [NameError] an instance method with the same name already exists
+      def generate_api_method(method_name, &block)
+        if instance_methods.include?(method_name.to_sym) || instance_methods.include?(method_name.to_s)
+          raise NameError.new("method #{method_name.inspect} already exists and cannot be used as an unbound method name")
+        end
+        define_method(method_name, &block)
+        method = instance_method(method_name)
+        remove_method(method_name)
+        proc { |endpoint_instance| method.bind(endpoint_instance).call }
+      end
+    end
+
     def initialize(settings, options = {}, &block)
       @settings = settings
-      @block = block
+      if block_given?
+        method_name = "#{options[:method]} #{settings.gather(:namespace).join( "/")} #{Array(options[:path]).join("/")}"
+        @block = self.class.generate_api_method(method_name, &block)
+      end
       @options = options
 
       raise ArgumentError, "Must specify :path option." unless options.key?(:path)
@@ -82,10 +110,20 @@ module Grape
     def prepare_path(path)
       parts = []
       parts << settings[:root_prefix] if settings[:root_prefix]
-      parts << ':version' if settings[:version] && settings[:version_options][:using] == :path
-      parts << namespace.to_s if namespace
-      parts << path.to_s if path && '/' != path
-      Rack::Mount::Utils.normalize_path(parts.join('/') + '(.:format)')
+
+      uses_path_versioning = settings[:version] && settings[:version_options][:using] == :path
+      namespace_is_empty = namespace && (namespace.to_s =~ /^\s*$/ || namespace.to_s == '/')
+      path_is_empty = path && (path.to_s =~ /^\s*$/ || path.to_s == '/')
+
+      parts << ':version' if uses_path_versioning
+      if !uses_path_versioning || (!namespace_is_empty || !path_is_empty)
+        parts << namespace.to_s if namespace
+        parts << path.to_s if path && '/' != path
+        format_suffix = '(.:format)'
+      else
+        format_suffix = '(/.:format)'
+      end
+      Rack::Mount::Utils.normalize_path(parts.join('/') + format_suffix)
     end
 
     def namespace
@@ -135,7 +173,7 @@ module Grape
       unless settings[:declared_params]
         raise ArgumentError, "Tried to filter for declared parameters but none exist."
       end
-      
+
       settings[:declared_params].inject({}){|h,k|
         output_key = options[:stringify] ? k.to_s : k.to_sym
         if params.key?(output_key) || options[:include_missing]
@@ -325,7 +363,7 @@ module Grape
 
       run_filters after_validations
 
-      response_text = instance_eval &self.block
+      response_text = @block.call(self)
       run_filters afters
       cookies.write(header)
 
@@ -358,7 +396,8 @@ module Grape
       b.use Grape::Middleware::Formatter,
         :format => settings[:format],
         :default_format => settings[:default_format] || :txt,
-        :content_types => settings[:content_types]
+        :content_types => settings[:content_types],
+        :formatters => settings[:formatters]
 
       aggregate_setting(:middleware).each do |m|
         m = m.dup

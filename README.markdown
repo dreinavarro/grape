@@ -299,12 +299,12 @@ end
 
 ### Validation Errors
 
-When validation and coercion erros occur an exception of type `ValidationError` is raised.
+When validation and coercion erros occur an exception of type `Grape::Exceptions::ValidationError` is raised.
 If the exception goes uncaught it will respond with a status of 400 and an error message.
-You can rescue a `ValidationError` and respond with a custom response.
+You can rescue a `Grape::Exceptions::ValidationError` and respond with a custom response.
 
 ```ruby
-rescue_from ValidationError do |e|
+rescue_from Grape::Exceptions::ValidationError do |e|
     Rack::Response.new({
         'status' => e.status,
         'message' => e.message,
@@ -589,9 +589,12 @@ Serialization takes place automatically.
 Your API can declare additional types to support. Response format is determined by the
 request's extension, an explicit `format` parameter in the query string, or `Accept` header.
 
+Custom formatters for additional types can be defined with a proc or by method pointer.
+
 ``` ruby
 class Twitter::API < Grape::API
   content_type :xls, "application/vnd.ms-excel"
+  formatter :xls, lambda { |object| object.to_fancy_xls }
 end
 ```
 
