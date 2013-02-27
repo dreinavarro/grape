@@ -58,6 +58,29 @@ describe Grape::Validations do
       end
     end
 
+    context 'group' do
+      before do
+        subject.params {
+          group :items do
+            requires :key
+          end
+        }
+        subject.get '/required' do 'required works'; end
+      end
+
+      it 'errors when param not present' do
+        get '/required'
+        last_response.status.should == 400
+        last_response.body.should == 'missing parameter: items[key]'
+      end
+
+      it "doesn't throw a missing param when param is present" do
+        get '/required', { :items => [:key => 'hello', :key => 'world'] }
+        last_response.status.should == 200
+        last_response.body.should == 'required works'
+      end
+    end
+
     context 'custom validation' do
       module CustomValidations
         class Customvalidator < Grape::Validations::Validator
@@ -85,7 +108,7 @@ describe Grape::Validations do
           last_response.body.should == 'custom: is not custom!'
         end
 
-        it "skip validation when parameter isn't present" do
+        it "skips validation when parameter isn't present" do
           get '/optional_custom'
           last_response.status.should == 200
           last_response.body.should == 'optional with custom works!'
@@ -147,20 +170,20 @@ describe Grape::Validations do
               end
             end
           end
-          
-          specify 'the parent namespace should use the validator' do
+
+          specify 'the parent namespace uses the validator' do
             get '/nested/one', { :custom => 'im wrong, validate me'}
             last_response.status.should == 400
             last_response.body.should == 'custom: is not custom!'
           end
-          
-          specify 'the nested namesapce should inherit the custom validator' do
+
+          specify 'the nested namesapce inherits the custom validator' do
             get '/nested/nested/two', { :custom => 'im wrong, validate me'}
             last_response.status.should == 400
             last_response.body.should == 'custom: is not custom!'
           end
-          
-          specify 'peer namesapces should not have the validator' do
+
+          specify 'peer namesapces does not have the validator' do
             get '/peer/one', { :custom => 'im not validated' }
             last_response.status.should == 200
             last_response.body.should == 'no validation required'

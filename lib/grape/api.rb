@@ -1,9 +1,3 @@
-require 'rack/mount'
-require 'rack/auth/basic'
-require 'rack/auth/digest/md5'
-require 'logger'
-require 'grape/util/deep_merge'
-
 module Grape
   # The API class is the primary entry point for
   # creating Grape APIs.Users should subclass this
@@ -72,10 +66,19 @@ module Grape
         settings.imbue(key, value)
       end
 
-      # Define a root URL prefix for your entire
-      # API.
+      # Define a root URL prefix for your entire API.
       def prefix(prefix = nil)
         prefix ? set(:root_prefix, prefix) : settings[:root_prefix]
+      end
+
+      # Do not route HEAD requests to GET requests automatically
+      def do_not_route_head!
+        set(:do_not_route_head, true)
+      end
+
+      # Do not automatically route OPTIONS
+      def do_not_route_options!
+        set(:do_not_route_options, true)
       end
 
       # Specify an API version.
@@ -101,7 +104,7 @@ module Grape
           options ||= {}
           options = {:using => :path}.merge!(options)
 
-          raise ArgumentError, "Must specify :vendor option." if options[:using] == :header && !options.has_key?(:vendor)
+          raise Grape::Exceptions::MissingVendorOption.new if options[:using] == :header && !options.has_key?(:vendor)
 
           @versions = versions | args
           nest(block) do
@@ -125,25 +128,49 @@ module Grape
       end
 
       # Specify the format for the API's serializers.
-      # May be `:json` or `:txt`.
+      # May be `:json`, `:xml`, `:txt`, etc.
       def format(new_format = nil)
-        new_format ? set(:format, new_format.to_sym) : settings[:format]
+        if new_format
+          set(:format, new_format.to_sym)
+          # define the default error formatters
+          set(:default_error_formatter, Grape::ErrorFormatter::Base.formatter_for(new_format, {}))
+          # define a single mime type
+          mime_type = content_types[new_format.to_sym]
+          raise Grape::Exceptions::MissingMimeType.new(new_format) unless mime_type
+          settings.imbue(:content_types, new_format.to_sym => mime_type)
+        else
+          settings[:format]
+        end
       end
 
+      # Specify a custom formatter for a content-type.
       def formatter(content_type, new_formatter)
         settings.imbue(:formatters, content_type.to_sym => new_formatter)
       end
 
-      # Specify the format for error messages.
-      # May be `:json` or `:txt` (default).
-      def error_format(new_format = nil)
-        new_format ? set(:error_format, new_format.to_sym) : settings[:error_format]
+      # Specify a custom parser for a content-type.
+      def parser(content_type, new_parser)
+        settings.imbue(:parsers, content_type.to_sym => new_parser)
+      end
+
+      # Specify a default error formatter.
+      def default_error_formatter(new_formatter = nil)
+        new_formatter ? set(:default_error_formatter, new_formatter) : settings[:default_error_formatter]
+      end
+
+      def error_formatter(format, new_formatter)
+        settings.imbue(:error_formatters, format.to_sym => new_formatter)
       end
 
       # Specify additional content-types, e.g.:
       #   content_type :xls, 'application/vnd.ms-excel'
       def content_type(key, val)
         settings.imbue(:content_types, key.to_sym => val)
+      end
+
+      # All available content types.
+      def content_types
+        Grape::ContentTypes.content_types_for(settings[:content_types])
       end
 
       # Specify the default status code for errors.
@@ -200,7 +227,7 @@ module Grape
       # @param model_class [Class] The model class that will be represented.
       # @option options [Class] :with The entity class that will represent the model.
       def represent(model_class, options)
-        raise ArgumentError, "You must specify an entity class in the :with option." unless options[:with] && options[:with].is_a?(Class)
+        raise Grape::Exceptions::InvalidWithOptionForRepresent.new unless options[:with] && options[:with].is_a?(Class)
         imbue(:representations, model_class => options[:with])
       end
 
@@ -210,10 +237,11 @@ module Grape
       # When called without a block, all known helpers within this scope
       # are included.
       #
-      # @param mod [Module] optional module of methods to include
-      # @param &block [Block] optional block of methods to include
+      # @param [Module] new_mod optional module of methods to include
+      # @param [Block] block optional block of methods to include
       #
       # @example Define some helpers.
+      #
       #     class ExampleAPI < Grape::API
       #       helpers do
       #         def current_user
@@ -221,6 +249,7 @@ module Grape
       #         end
       #       end
       #     end
+      #
       def helpers(new_mod = nil, &block)
         if block_given? || new_mod
           mod = settings.peek[:helpers] || Module.new
@@ -267,17 +296,19 @@ module Grape
       end
 
       def mount(mounts)
-        mounts = {mounts => '/'} unless mounts.respond_to?(:each_pair)
+        mounts = { mounts => '/' } unless mounts.respond_to?(:each_pair)
         mounts.each_pair do |app, path|
-          if app.respond_to?(:inherit_settings)
-            app.inherit_settings(settings.clone)
+          if app.respond_to?(:inherit_settings, true)
+            app_settings = settings.clone
+            mount_path = Rack::Mount::Utils.normalize_path([ settings[:mount_path], path ].compact.join("/"))
+            app_settings.set :mount_path, mount_path
+            app.inherit_settings(app_settings)
           end
-
-          endpoints << Grape::Endpoint.new(settings.clone,
+          endpoints << Grape::Endpoint.new(settings.clone, {
             :method => :any,
             :path => path,
             :app => app
-          )
+          })
         end
       end
 
@@ -405,7 +436,7 @@ module Grape
         end
       end
 
-     def inherited(subclass)
+      def inherited(subclass)
         subclass.reset!
         subclass.logger = logger.clone
       end
@@ -426,7 +457,22 @@ module Grape
     end
 
     def call(env)
-      @route_set.call(env)
+      status, headers, body = @route_set.call(env)
+      headers.delete('X-Cascade') unless cascade?
+      [ status, headers, body ]
+    end
+
+    # Some requests may return a HTTP 404 error if grape cannot find a matching
+    # route. In this case, Rack::Mount adds a X-Cascade header to the response
+    # and sets it to 'pass', indicating to grape's parents they should keep
+    # looking for a matching route on other resources.
+    #
+    # In some applications (e.g. mounting grape on rails), one might need to trap
+    # errors from reaching upstream. This is effectivelly done by unsetting
+    # X-Cascade. Default :cascade is true.
+    def cascade?
+      cascade = ((self.class.settings || {})[:version_options] || {})[:cascade]
+      cascade.nil? ? true : cascade
     end
 
     reset!
@@ -447,16 +493,19 @@ module Grape
       resources.flatten.each do |route|
         allowed_methods[route.route_compiled] << route.route_method
       end
-
       allowed_methods.each do |path_info, methods|
+        if methods.include?('GET') && ! methods.include?("HEAD") && ! self.class.settings[:do_not_route_head]
+          methods = methods | [ 'HEAD' ]
+        end
         allow_header = (["OPTIONS"] | methods).join(", ")
-        unless methods.include?("OPTIONS")
+        unless methods.include?("OPTIONS") || self.class.settings[:do_not_route_options]
           @route_set.add_route( proc { [204, { 'Allow' => allow_header }, []]}, {
             :path_info      => path_info,
             :request_method => "OPTIONS"
           })
         end
         not_allowed_methods = %w(GET PUT POST DELETE PATCH HEAD) - methods
+        not_allowed_methods << "OPTIONS" if self.class.settings[:do_not_route_options]
         not_allowed_methods.each do |bad_method|
           @route_set.add_route( proc { [405, { 'Allow' => allow_header }, []]}, {
             :path_info      => path_info,

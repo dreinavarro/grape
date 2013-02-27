@@ -1,14 +1,10 @@
-require 'rack'
-require 'grape'
-require 'hashie'
-
 module Grape
   # An Endpoint is the proxy scope in which all routing
   # blocks are executed. In other words, any methods
   # on the instance level of this class may be called
-  # from inside a `get`, `post`, etc. block.
+  # from inside a `get`, `post`, etc.
   class Endpoint
-    attr_accessor :block, :options, :settings
+    attr_accessor :block, :source, :options, :settings
     attr_reader :env, :request
 
     class << self
@@ -39,34 +35,46 @@ module Grape
     def initialize(settings, options = {}, &block)
       @settings = settings
       if block_given?
-        method_name = "#{options[:method]} #{settings.gather(:namespace).join( "/")} #{Array(options[:path]).join("/")}"
+        method_name = [ 
+          options[:method],
+          settings.gather(:namespace).join("/"),
+          settings.gather(:mount_path).join("/"),
+          Array(options[:path]).join("/")
+        ].join(" ")
+        @source = block
         @block = self.class.generate_api_method(method_name, &block)
       end
       @options = options
 
-      raise ArgumentError, "Must specify :path option." unless options.key?(:path)
+      raise Grape::Exceptions::MissingOption.new(:path) unless options.key?(:path)
       options[:path] = Array(options[:path])
       options[:path] = ['/'] if options[:path].empty?
 
-      raise ArgumentError, "Must specify :method option." unless options.key?(:method)
+      raise Grape::Exceptions::MissingOption.new(:method) unless options.key?(:method)
       options[:method] = Array(options[:method])
 
       options[:route_options] ||= {}
     end
 
     def routes
-      @routes ||= prepare_routes
+      @routes ||= endpoints ? endpoints.collect(&:routes).flatten : prepare_routes
     end
 
     def mount_in(route_set)
-      if options[:app] && options[:app].respond_to?(:endpoints)
-        options[:app].endpoints.each{|e| e.mount_in(route_set)}
+      if endpoints
+        endpoints.each { |e| e.mount_in(route_set) }
       else
         routes.each do |route|
-          route_set.add_route(self, {
-            :path_info => route.route_compiled,
-            :request_method => route.route_method,
-          }, { :route_info => route })
+          methods = [ route.route_method ]
+          if ! settings[:do_not_route_head] && route.route_method == "GET"
+            methods << "HEAD"
+          end
+          methods.each do |method|
+            route_set.add_route(self, {
+              :path_info => route.route_compiled,
+              :request_method => method,
+            }, { :route_info => route })
+          end
         end
       end
     end
@@ -109,20 +117,22 @@ module Grape
 
     def prepare_path(path)
       parts = []
-      parts << settings[:root_prefix] if settings[:root_prefix]
+      parts << settings[:mount_path].to_s.split("/") if settings[:mount_path]
+      parts << settings[:root_prefix].to_s.split("/") if settings[:root_prefix]
 
       uses_path_versioning = settings[:version] && settings[:version_options][:using] == :path
       namespace_is_empty = namespace && (namespace.to_s =~ /^\s*$/ || namespace.to_s == '/')
       path_is_empty = path && (path.to_s =~ /^\s*$/ || path.to_s == '/')
 
       parts << ':version' if uses_path_versioning
-      if !uses_path_versioning || (!namespace_is_empty || !path_is_empty)
+      if ! uses_path_versioning || (! namespace_is_empty || ! path_is_empty)
         parts << namespace.to_s if namespace
-        parts << path.to_s if path && '/' != path
+        parts << path.to_s if path
         format_suffix = '(.:format)'
       else
         format_suffix = '(/.:format)'
       end
+      parts = parts.flatten.select { |part| part != '/' }
       Rack::Mount::Utils.normalize_path(parts.join('/') + format_suffix)
     end
 
@@ -157,8 +167,7 @@ module Grape
     def params
       @params ||= Hashie::Mash.new.
         deep_merge(request.params).
-        deep_merge(env['rack.routing_args'] || {}).
-        deep_merge(self.body_params)
+        deep_merge(env['rack.routing_args'] || {})
     end
 
     # A filtering method that will return a hash
@@ -181,22 +190,6 @@ module Grape
         end
         h
       }
-    end
-
-    # Pull out request body params if the content type matches and we're on a POST or PUT
-    def body_params
-      if ['POST', 'PUT'].include?(request.request_method.to_s.upcase) && request.content_length.to_i > 0
-        return case env['CONTENT_TYPE']
-          when 'application/json'
-            MultiJson.decode(request.body.read)
-          when 'application/xml'
-            MultiXml.parse(request.body.read)
-          else
-            {}
-          end
-      end
-
-      {}
     end
 
     # The API version as specified in the URL.
@@ -259,6 +252,17 @@ module Grape
       end
     end
 
+    # Retrieves all available request headers.
+    def headers
+      @headers ||= @env.dup.inject({}) { |h, (k, v)|
+        if k.start_with? 'HTTP_'
+          k = k[5..-1].gsub('_', '-').downcase.gsub(/^.|[-_\s]./) { |x| x.upcase }
+          h[k] = v
+        end
+        h
+      }
+    end
+
     # Set response content-type
     def content_type(val)
       header('Content-Type', val)
@@ -312,11 +316,14 @@ module Grape
     def present(object, options = {})
       entity_class = options.delete(:with)
 
-      object.class.ancestors.each do |potential|
+      # auto-detect the entity from the first object in the collection
+      object_instance = object.is_a?(Array) ? object.first : object
+
+      object_instance.class.ancestors.each do |potential|
         entity_class ||= (settings[:representations] || {})[potential]
       end
 
-      entity_class ||= object.class.const_get(:Entity) if object.class.const_defined?(:Entity)
+      entity_class ||= object_instance.class.const_get(:Entity) if object_instance.class.const_defined?(:Entity)
 
       root = options.delete(:root)
 
@@ -345,6 +352,16 @@ module Grape
     end
 
     protected
+
+    # Return the collection of endpoints within this endpoint.
+    # This is the case when an Grape::API mounts another Grape::API.
+    def endpoints
+      if options[:app] && options[:app].respond_to?(:endpoints)
+        options[:app].endpoints
+      else
+        nil
+      end
+    end
 
     def run(env)
       @env = env
@@ -378,18 +395,19 @@ module Grape
         :default_status => settings[:default_error_status] || 403,
         :rescue_all => settings[:rescue_all],
         :rescued_errors => aggregate_setting(:rescued_errors),
-        :format => settings[:error_format] || :txt,
+        :default_error_formatter => settings[:default_error_formatter],
+        :error_formatters => settings[:error_formatters],
         :rescue_options => settings[:rescue_options],
         :rescue_handlers => merged_setting(:rescue_handlers)
 
       b.use Rack::Auth::Basic, settings[:auth][:realm], &settings[:auth][:proc] if settings[:auth] && settings[:auth][:type] == :http_basic
       b.use Rack::Auth::Digest::MD5, settings[:auth][:realm], settings[:auth][:opaque], &settings[:auth][:proc] if settings[:auth] && settings[:auth][:type] == :http_digest
-      b.use Grape::Middleware::Prefixer, :prefix => settings[:root_prefix] if settings[:root_prefix]
 
       if settings[:version]
         b.use Grape::Middleware::Versioner.using(settings[:version_options][:using]), {
           :versions        => settings[:version],
-          :version_options => settings[:version_options]
+          :version_options => settings[:version_options],
+          :prefix          => settings[:root_prefix]
         }
       end
 
@@ -397,7 +415,8 @@ module Grape
         :format => settings[:format],
         :default_format => settings[:default_format] || :txt,
         :content_types => settings[:content_types],
-        :formatters => settings[:formatters]
+        :formatters => settings[:formatters],
+        :parsers => settings[:parsers]
 
       aggregate_setting(:middleware).each do |m|
         m = m.dup

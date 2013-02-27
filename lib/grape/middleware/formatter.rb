@@ -3,13 +3,11 @@ require 'grape/middleware/base'
 module Grape
   module Middleware
     class Formatter < Base
-      include Formats
 
       def default_options
         {
           :default_format => :txt,
           :formatters => {},
-          :content_types => {},
           :parsers => {}
         }
       end
@@ -19,68 +17,105 @@ module Grape
       end
 
       def before
-        fmt = format_from_extension || format_from_params || options[:format] || format_from_header || options[:default_format]
-        if content_types.key?(fmt)
-          if !env['rack.input'].nil? and (body = env['rack.input'].read).strip.length != 0
-            parser = parser_for fmt
-            unless parser.nil?
-              begin
-                body = parser.call(body)
-                env['rack.request.form_hash'] = !env['rack.request.form_hash'].nil? ? env['rack.request.form_hash'].merge(body) : body
-                env['rack.request.form_input'] = env['rack.input']
-              rescue
-                # It's possible that it's just regular POST content -- just back off
-              end
-            end
-            env['rack.input'].rewind
-          end
-          env['api.format'] = fmt
-        else
-          throw :error, :status => 406, :message => 'The requested format is not supported.'
-        end
-      end
-
-      def format_from_extension
-        parts = request.path.split('.')
-        extension = parts.last.to_sym
-
-        if parts.size > 1 && content_types.key?(extension)
-          return extension
-        end
-        nil
-      end
-
-      def format_from_params
-        fmt = Rack::Utils.parse_nested_query(env['QUERY_STRING'])["format"]
-        fmt ? fmt.to_sym : nil
-      end
-
-      def format_from_header
-        mime_array.each do |t|
-          if mime_types.key?(t)
-            return mime_types[t]
-          end
-        end
-        nil
-      end
-
-      def mime_array
-        accept = headers['accept'] or return []
-
-        accept.gsub(/\b/,'').scan(%r((\w+/[\w+.-]+)(?:(?:;[^,]*?)?;\s*q=([\d.]+))?)).sort_by { |_, q| -q.to_f }.map {|mime, _|
-          mime.sub(%r(vnd\.[^+]+\+), '')
-        }
+        negotiate_content_type
+        read_body_input
       end
 
       def after
         status, headers, bodies = *@app_response
-        formatter = formatter_for env['api.format']
-        bodymap = bodies.collect do |body|
-          formatter.call(body)
+        formatter = Grape::Formatter::Base.formatter_for env['api.format'], options
+        begin
+          bodymap = bodies.collect do |body|
+            formatter.call body, env
+          end
+        rescue Exception => e
+          throw :error, :status => 500, :message => e.message
         end
-        headers['Content-Type'] = content_types[env['api.format']] unless headers['Content-Type']
+        headers['Content-Type'] = content_type_for(env['api.format']) unless headers['Content-Type']
         Rack::Response.new(bodymap, status, headers).to_a
       end
+
+      private
+
+        def read_body_input
+          if (request.post? || request.put? || request.patch?) && (! request.form_data?) && (! request.parseable_data?) && (request.content_length.to_i > 0)
+            if env['rack.input'] && (body = env['rack.input'].read).length > 0
+              begin
+                fmt = mime_types[request.media_type] if request.media_type
+                if content_type_for(fmt)
+                  parser = Grape::Parser::Base.parser_for fmt, options
+                  unless parser.nil?
+                    begin
+                      body = parser.call body, env
+                      env['rack.request.form_hash'] = env['rack.request.form_hash'] ? env['rack.request.form_hash'].merge(body) : body
+                      env['rack.request.form_input'] = env['rack.input']
+                    rescue Exception => e
+                      throw :error, :status => 400, :message => e.message
+                    end
+                  end
+                else
+                  throw :error, :status => 406, :message => "The requested content-type '#{request.media_type}' is not supported."
+                end
+              ensure
+                env['rack.input'].rewind
+              end
+            end
+          end
+        end
+
+        def negotiate_content_type
+          fmt = format_from_extension || format_from_params || options[:format] || format_from_header || options[:default_format]
+          if content_type_for(fmt)
+            env['api.format'] = fmt
+          else
+            throw :error, :status => 406, :message => "The requested format '#{fmt}' is not supported."
+          end
+        end
+
+        def format_from_extension
+          parts = request.path.split('.')
+
+          if parts.size > 1
+            extension = parts.last
+            # avoid symbol memory leak on an unknown format
+            return extension.to_sym if content_type_for(extension)
+          end
+          nil
+        end
+
+        def format_from_params
+          fmt = Rack::Utils.parse_nested_query(env['QUERY_STRING'])["format"]
+          # avoid symbol memory leak on an unknown format
+          return fmt.to_sym if content_type_for(fmt)
+          fmt
+        end
+
+        def format_from_header
+          mime_array.each do |t|
+            if mime_types.key?(t)
+              return mime_types[t]
+            end
+          end
+          nil
+        end
+
+        def mime_array
+          accept = headers['accept'] or return []
+          accept_into_mime_and_quality = %r(
+            (
+              \w+/[\w+.-]+)     # eg application/vnd.example.myformat+xml
+            (?:
+             (?:;[^,]*?)?       # optionally multiple formats in a row
+             ;\s*q=([\d.]+)     # optional "quality" preference (eg q=0.5)
+            )?
+          )x  # x = extended regular expression with comments etc
+          vendor_prefix_pattern = %r(vnd\.[^+]+\+)
+
+          accept.scan(accept_into_mime_and_quality).
+            sort_by { |_, quality_preference| -quality_preference.to_f }.
+            map {|mime, _| mime.sub(vendor_prefix_pattern, '') }
+        end
+
     end
   end
 end
