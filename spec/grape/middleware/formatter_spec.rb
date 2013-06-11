@@ -36,6 +36,29 @@ describe Grape::Middleware::Formatter do
     end
   end
 
+  context 'error handling' do
+    let(:formatter) { stub(:formatter) }
+    before do
+      Grape::Formatter::Base.stub(:formatter_for) { formatter }
+    end
+
+    it 'rescues formatter-specific exceptions' do
+      formatter.stub(:call) { raise Grape::Exceptions::InvalidFormatter.new(String, 'xml') }
+
+      expect {
+        catch(:error){subject.call({'PATH_INFO' => '/somewhere.xml', 'HTTP_ACCEPT' => 'application/json'})}
+      }.to_not raise_error
+    end
+
+    it 'does not rescue other exceptions' do
+      formatter.stub(:call) { raise StandardError }
+
+      expect {
+        catch(:error){subject.call({'PATH_INFO' => '/somewhere.xml', 'HTTP_ACCEPT' => 'application/json'})}
+      }.to raise_error
+    end
+  end
+
   context 'detection' do
 
     it 'uses the extension if one is provided' do
@@ -165,6 +188,31 @@ describe Grape::Middleware::Formatter do
             subject.env['rack.request.form_hash']['string'].should == 'thing'
           end
         end
+      end
+      it "parses the chunked body from #{method} and copies values into rack.request.from_hash" do
+        io = StringIO.new('{"is_boolean":true,"string":"thing"}')
+        subject.call({
+          'PATH_INFO' => '/infol',
+          'REQUEST_METHOD' => method,
+          'CONTENT_TYPE' => 'application/json',
+          'rack.input' => io,
+          'HTTP_TRANSFER_ENCODING' => 'chunked'
+        })
+        subject.env['rack.request.form_hash']['is_boolean'].should be_true
+        subject.env['rack.request.form_hash']['string'].should == 'thing'
+      end
+      it "rewinds IO" do
+        io = StringIO.new('{"is_boolean":true,"string":"thing"}')
+        io.read
+        subject.call({
+          'PATH_INFO' => '/infol',
+          'REQUEST_METHOD' => method,
+          'CONTENT_TYPE' => 'application/json',
+          'rack.input' => io,
+          'HTTP_TRANSFER_ENCODING' => 'chunked'
+        })
+        subject.env['rack.request.form_hash']['is_boolean'].should be_true
+        subject.env['rack.request.form_hash']['string'].should == 'thing'
       end
       it 'parses the body from an xml #{method} and copies values into rack.request.from_hash' do
         io = StringIO.new('<thing><name>Test</name></thing>')

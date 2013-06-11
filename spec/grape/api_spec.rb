@@ -57,6 +57,7 @@ describe Grape::API do
       end
     end
   end
+
   describe '.version using param' do
     it_should_behave_like 'versioning' do
       let(:macro_options) do
@@ -93,8 +94,16 @@ describe Grape::API do
       # end
     end
 
-    it 'routes if any media type is allowed' do
+    # pending 'routes if any media type is allowed'
+  end
 
+  describe '.version using accept_version_header' do
+    it_should_behave_like 'versioning' do
+      let(:macro_options) do
+        {
+          :using  => :accept_version_header
+        }
+      end
     end
   end
 
@@ -108,7 +117,6 @@ describe Grape::API do
       subject.represent Object, :with => klass
       subject.settings[:representations][Object].should == klass
     end
-
   end
 
   describe '.namespace' do
@@ -183,13 +191,42 @@ describe Grape::API do
     end
   end
 
+  describe '.route_param' do
+    it 'adds a parameterized route segment namespace' do
+      subject.namespace :users do
+        route_param :id do
+          get do
+            params[:id]
+          end
+        end
+      end
+
+      get '/users/23'
+      last_response.body.should == '23'
+    end
+
+    it 'should be able to define requirements with a single hash' do
+      subject.namespace :users do
+        route_param :id, :requirements => /[0-9]+/ do
+          get do
+            params[:id]
+          end
+        end
+      end
+
+      get '/users/michael'
+      last_response.status.should == 404
+      get '/users/23'
+      last_response.status.should == 200
+    end
+  end
+
   describe '.route' do
     it 'allows for no path' do
       subject.namespace :votes do
         get do
           "Votes"
         end
-
         post do
           "Created a Vote"
         end
@@ -201,15 +238,22 @@ describe Grape::API do
       last_response.body.should eql 'Created a Vote'
     end
 
+    it 'handles empty calls' do
+      subject.get "/"
+      get "/"
+      last_response.body.should eql ""
+    end
+
     describe 'root routes should work with' do
       before do
+        subject.format :txt
         def subject.enable_root_route!
-          self.get("/") {"root"}
+          self.get("/") { "root" }
         end
       end
 
       after do
-        last_response.body.should eql 'root'
+        last_response.body.should eql "root"
       end
 
       describe 'path versioned APIs' do
@@ -239,6 +283,13 @@ describe Grape::API do
         subject.enable_root_route!
 
         versioned_get "/", "v1", :using => :param
+      end
+
+      it 'Accept-Version header versioned APIs' do
+        subject.version 'v1', :using => :accept_version_header
+        subject.enable_root_route!
+
+        versioned_get "/", "v1", :using => :accept_version_header
       end
 
       it 'unversioned APIs' do
@@ -312,6 +363,43 @@ describe Grape::API do
       last_response.body.should eql 'hiya'
       post '/abc'
       last_response.body.should eql 'hiya'
+    end
+
+    [ :put, :post ].each do |verb|
+      context verb do
+        [ 'string', :symbol, 1, -1.1, {}, [], true, false, nil ].each do |object|
+          it "allows a(n) #{object.class} json object in params" do
+            subject.format :json
+            subject.send(verb) do
+              env['api.request.body']
+            end
+            send verb, '/', MultiJson.dump(object), { 'CONTENT_TYPE' => 'application/json' }
+            last_response.status.should == (verb == :post ? 201 : 200)
+            last_response.body.should eql MultiJson.dump(object)
+            last_request.params.should eql Hash.new
+          end
+          it "stores input in api.request.input" do
+            subject.format :json
+            subject.send(verb) do
+              env['api.request.input']
+            end
+            send verb, '/', MultiJson.dump(object), { 'CONTENT_TYPE' => 'application/json' }
+            last_response.status.should == (verb == :post ? 201 : 200)
+            last_response.body.should eql MultiJson.dump(object).to_json
+          end
+          context "chunked transfer encoding" do
+            it "stores input in api.request.input" do
+              subject.format :json
+              subject.send(verb) do
+                env['api.request.input']
+              end
+              send verb, '/', MultiJson.dump(object), { 'CONTENT_TYPE' => 'application/json', 'HTTP_TRANSFER_ENCODING' => 'chunked', 'CONTENT_LENGTH' => nil  }
+              last_response.status.should == (verb == :post ? 201 : 200)
+              last_response.body.should eql MultiJson.dump(object).to_json
+            end
+          end
+        end
+      end
     end
 
     it 'allows for multipart paths' do
@@ -393,6 +481,17 @@ describe Grape::API do
       end
       put '/example'
       last_response.headers['Allow'].should eql 'OPTIONS, GET, POST, HEAD'
+    end
+
+    specify '405 responses includes an Content-Type header' do
+      subject.get 'example' do
+        "example"
+      end
+      subject.post 'example' do
+        "example"
+      end
+      put '/example'
+      last_response.headers['Content-Type'].should eql 'text/plain'
     end
 
     it 'adds an OPTIONS route that returns a 204 and an Allow header' do
@@ -631,6 +730,20 @@ describe Grape::API do
           last_response.body.should == 'true'
         end
       end
+
+      it 'mounts behind error middleware' do
+        m = Class.new(Grape::Middleware::Base) do
+          def before
+            throw :error, :message => "Caught in the Net", :status => 400
+          end
+        end
+        subject.use m
+        subject.get "/" do
+        end
+        get "/"
+        last_response.status.should == 400
+        last_response.body.should == "Caught in the Net"
+      end
     end
   end
   describe '.basic' do
@@ -683,6 +796,13 @@ describe Grape::API do
       mylogger = Class.new
       subject.logger mylogger
       mylogger.should_receive(:info).exactly(1).times
+      subject.logger.info "this will be logged"
+    end
+
+    it "defaults to a standard logger log format" do
+      t = Time.at(100)
+      Time.stub(:now).and_return(t)
+      STDOUT.should_receive(:write).with("I, [#{Logger::Formatter.new.send(:format_datetime, t)}\##{Process.pid}]  INFO -- : this will be logged\n")
       subject.logger.info "this will be logged"
     end
   end
@@ -866,6 +986,21 @@ describe Grape::API do
       get '/custom_error'
       last_response.status.should == 400
       last_response.body.should == 'New Error'
+    end
+
+    it 'can rescue exceptions raised in the formatter' do
+      formatter = stub(:formatter)
+      formatter.stub(:call) { raise StandardError }
+      Grape::Formatter::Base.stub(:formatter_for) { formatter }
+
+      subject.rescue_from :all do |e|
+        rack_response('Formatter Error', 500)
+      end
+      subject.get('/formatter_exception') { 'Hello world' }
+
+      get '/formatter_exception'
+      last_response.status.should eql 500
+      last_response.body.should == 'Formatter Error'
     end
   end
 
@@ -1132,6 +1267,15 @@ describe Grape::API do
   end
 
   describe '.parser' do
+    it 'parses data in format requested by content-type' do
+      subject.format :json
+      subject.post '/data' do
+        { :x => params[:x] }
+      end
+      post "/data", '{"x":42}', { 'CONTENT_TYPE' => 'application/json' }
+      last_response.status.should == 201
+      last_response.body.should == '{"x":42}'
+    end
     context 'lambda parser' do
       before :each do
         subject.content_type :txt, "text/plain"
@@ -1178,6 +1322,42 @@ describe Grape::API do
         last_response.status.should == 400
         last_response.body.should eql 'Disallowed type attribute: "symbol"'
       end
+    end
+    context "none parser class" do
+      before :each do
+        subject.parser :json, nil
+        subject.put "data" do
+          "body: #{env['api.request.body']}"
+        end
+      end
+      it "does not parse data" do
+        put '/data', 'not valid json', "CONTENT_TYPE" => "application/json"
+        last_response.status.should == 200
+        last_response.body.should == "body: not valid json"
+      end
+    end
+  end
+
+  describe '.default_format' do
+    before :each do
+      subject.format :json
+      subject.default_format :json
+    end
+    it 'returns data in default format' do
+      subject.get '/data' do
+        { :x => 42 }
+      end
+      get "/data"
+      last_response.status.should == 200
+      last_response.body.should == '{"x":42}'
+    end
+    it 'parses data in default format' do
+      subject.post '/data' do
+        { :x => params[:x] }
+      end
+      post "/data", '{"x":42}', "CONTENT_TYPE" => ""
+      last_response.status.should == 201
+      last_response.body.should == '{"x":42}'
     end
   end
 
@@ -1540,6 +1720,24 @@ describe Grape::API do
         last_response.body.should == 'yo'
       end
 
+      it 'applies the settings to nested mounted apis' do
+        subject.version 'v1', :using => :path
+
+        subject.namespace :cool do
+          inner_app = Class.new(Grape::API)
+          inner_app.get('/awesome') do
+            "yo"
+          end
+
+          app = Class.new(Grape::API)
+          app.mount inner_app
+          mount app
+        end
+
+        get '/v1/cool/awesome'
+        last_response.body.should == 'yo'
+      end
+
       it 'inherits rescues even when some defined by mounted' do
         subject.rescue_from :all do |e|
           rack_response("rescued from #{e.message}", 202)
@@ -1678,7 +1876,7 @@ describe Grape::API do
       end
     end
   end
-  context 'format' do
+  describe '.format' do
     context ':txt' do
       before(:each) do
         subject.format :txt
@@ -1740,33 +1938,56 @@ describe Grape::API do
         get '/meaning_of_life', {}, { 'HTTP_ACCEPT' => 'text/html' }
         last_response.body.should == { :meaning_of_life => 42 }.to_json
       end
+      it 'can be overwritten with an explicit content type' do
+        subject.get '/meaning_of_life_with_content_type' do
+          content_type "text/plain"
+          { :meaning_of_life => 42 }.to_s
+        end
+        get '/meaning_of_life_with_content_type'
+        last_response.body.should == { :meaning_of_life => 42 }.to_s
+      end
+      it 'raised :error from middleware' do
+        middleware = Class.new(Grape::Middleware::Base) do
+          def before
+            throw :error, :message => "Unauthorized", :status => 42
+          end
+        end
+        subject.use middleware
+        subject.get do
+
+        end
+        get "/"
+        last_response.status.should == 42
+        last_response.body.should == { :error => "Unauthorized" }.to_json
+      end
+
     end
     context ':serializable_hash' do
       before(:each) do
-        class SimpleExample
+        class SerializableHashExample
           def serializable_hash
-            {:abc => 'def'}
+            { :abc => 'def' }
           end
         end
         subject.format :serializable_hash
       end
       it 'instance' do
         subject.get '/example' do
-          SimpleExample.new
+          SerializableHashExample.new
         end
         get '/example'
         last_response.body.should == '{"abc":"def"}'
       end
       it 'root' do
         subject.get '/example' do
-          { "root" => SimpleExample.new }
+          { "root" => SerializableHashExample.new }
         end
         get '/example'
         last_response.body.should == '{"root":{"abc":"def"}}'
       end
       it 'array' do
         subject.get '/examples' do
-          [ SimpleExample.new, SimpleExample.new ]
+          [ SerializableHashExample.new, SerializableHashExample.new ]
         end
         get '/examples'
         last_response.body.should == '[{"abc":"def"},{"abc":"def"}]'
@@ -1820,6 +2041,25 @@ XML
 </strings>
 XML
       end
+      it 'raised :error from middleware' do
+        middleware = Class.new(Grape::Middleware::Base) do
+          def before
+            throw :error, :message => "Unauthorized", :status => 42
+          end
+        end
+        subject.use middleware
+        subject.get do
+
+        end
+        get "/"
+        last_response.status.should == 42
+        last_response.body.should == <<-XML
+<?xml version="1.0" encoding="UTF-8"?>
+<error>
+  <message>Unauthorized</message>
+</error>
+XML
+      end
     end
   end
 
@@ -1857,18 +2097,33 @@ XML
   end
 
   context "cascading" do
-    it "cascades" do
-      subject.version 'v1', :using => :path, :cascade => true
-      get "/v1/hello"
-      last_response.status.should == 404
-      last_response.headers["X-Cascade"].should == "pass"
+    context "via version" do
+      it "cascades" do
+        subject.version 'v1', :using => :path, :cascade => true
+        get "/v1/hello"
+        last_response.status.should == 404
+        last_response.headers["X-Cascade"].should == "pass"
+      end
+      it "does not cascade" do
+        subject.version 'v2', :using => :path, :cascade => false
+        get "/v2/hello"
+        last_response.status.should == 404
+        last_response.headers.keys.should_not include "X-Cascade"
+      end
     end
-
-    it "does not cascade" do
-      subject.version 'v2', :using => :path, :cascade => false
-      get "/v2/hello"
-      last_response.status.should == 404
-      last_response.headers.keys.should_not include "X-Cascade"
+    context "via endpoint" do
+      it "cascades" do
+        subject.cascade true
+        get "/hello"
+        last_response.status.should == 404
+        last_response.headers["X-Cascade"].should == "pass"
+      end
+      it "does not cascade" do
+        subject.cascade false
+        get "/hello"
+        last_response.status.should == 404
+        last_response.headers.keys.should_not include "X-Cascade"
+      end
     end
   end
 end

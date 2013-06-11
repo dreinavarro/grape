@@ -40,12 +40,23 @@ describe Grape::Entity do
       entity.stub!(:represent).and_return("Hiya")
 
       class TestObject; end
+      class FakeCollection
+        def first; TestObject.new; end
+      end
 
       subject.represent TestObject, :with => entity
       subject.get '/example' do
         present [TestObject.new]
       end
+
+      subject.get '/example2' do
+        present FakeCollection.new
+      end
+
       get '/example'
+      last_response.body.should == "Hiya"
+
+      get '/example2'
       last_response.body.should == "Hiya"
     end
 
@@ -197,14 +208,18 @@ XML
       last_response.body.should == '{"example":{"name":"johnnyiller"}}'
     end
 
-    it 'presents with jsonp and a custom formatter' do
+    it 'presents with jsonp utilising Rack::JSONP' do
+      require 'rack/contrib'
+
+      # Include JSONP middleware
+      subject.use Rack::JSONP
+
       entity = Class.new(Grape::Entity)
       entity.root "examples", "example"
       entity.expose :name
 
-      subject.content_type :jsonp, 'application/javascript'
-      subject.formatter :jsonp, lambda { |object, env| object.to_json }
-      subject.format :jsonp
+      # Rack::JSONP expects a standard JSON response
+      subject.format :json
 
       subject.get '/example' do
         c = Class.new do
@@ -216,11 +231,50 @@ XML
 
         present c.new({:name => "johnnyiller"}), :with => entity
       end
-      get '/example'
+
+      get '/example?callback=abcDef'
       last_response.status.should == 200
       last_response.headers['Content-type'].should == "application/javascript"
-      last_response.body.should == '{"example":{"name":"johnnyiller"}}'
+      last_response.body.should == 'abcDef({"example":{"name":"johnnyiller"}})'
     end
+
+    context "present with multiple entities" do
+      let(:user) do
+      end
+
+      before :each do
+      end
+
+      it "present with multiple entities using optional symbol" do
+        user = Class.new do
+          attr_reader :name
+          def initialize(args)
+            @name = args[:name] || "no name set"
+          end
+        end
+        user1 = user.new({:name => 'user1'})
+        user2 = user.new({:name => 'user2'})
+
+        entity = Class.new(Grape::Entity)
+        entity.expose :name
+
+        subject.format :json
+        subject.get '/example' do
+          present :page, 1
+          present :user1, user1, :with => entity
+          present :user2, user2, :with => entity
+        end
+        get '/example'
+        expect_response_json = {
+          "page"  => 1,
+          "user1" => {"name" => "user1"},
+          "user2" => {"name" => "user2"}
+        }
+        JSON(last_response.body).should == expect_response_json
+      end
+
+    end
+
 
   end
 

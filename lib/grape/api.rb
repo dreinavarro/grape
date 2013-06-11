@@ -356,18 +356,29 @@ module Grape
       def options(paths = ['/'], options = {}, &block); route('OPTIONS', paths, options, &block) end
       def patch(paths = ['/'], options = {}, &block); route('PATCH', paths, options, &block) end
 
-      def namespace(space = nil, &block)
+      def namespace(space = nil, options = {},  &block)
         if space || block_given?
           previous_namespace_description = @namespace_description
           @namespace_description = (@namespace_description || {}).deep_merge(@last_description || {})
           @last_description = nil
           nest(block) do
-            set(:namespace, space.to_s) if space
+            set(:namespace, Namespace.new(space, options)) if space
           end
           @namespace_description = previous_namespace_description
         else
-          Rack::Mount::Utils.normalize_path(settings.stack.map{|s| s[:namespace]}.join('/'))
+          Namespace.joined_space_path(settings)
         end
+      end
+
+      # Thie method allows you to quickly define a parameter route segment
+      # in your API.
+      #
+      # @param param [Symbol] The name of the parameter you wish to declare.
+      # @option options [Regexp] You may supply a regular expression that the declared parameter must meet.
+      def route_param(param, options = {}, &block)
+        options = options.dup
+        options[:requirements] = { param.to_sym => options[:requirements] } if options[:requirements].is_a?(Regexp)
+        namespace(":#{param}", options, &block)
       end
 
       alias_method :group, :namespace
@@ -410,6 +421,12 @@ module Grape
         @versions ||= []
       end
 
+      def cascade(value = nil)
+        value.nil? ? 
+          (settings.has_key?(:cascade) ? !! settings[:cascade] : true) :
+          set(:cascade, value)
+      end
+
       protected
 
       def prepare_routes
@@ -443,7 +460,10 @@ module Grape
 
       def inherit_settings(other_stack)
         settings.prepend other_stack
-        endpoints.each{|e| e.settings.prepend(other_stack)}
+        endpoints.each do |e|
+          e.settings.prepend(other_stack)
+          e.options[:app].inherit_settings(other_stack) if e.options[:app].respond_to?(:inherit_settings, true)
+        end
       end
     end
 
@@ -471,8 +491,9 @@ module Grape
     # errors from reaching upstream. This is effectivelly done by unsetting
     # X-Cascade. Default :cascade is true.
     def cascade?
-      cascade = ((self.class.settings || {})[:version_options] || {})[:cascade]
-      cascade.nil? ? true : cascade
+      return !! self.class.settings[:cascade] if self.class.settings.has_key?(:cascade)
+      return !! self.class.settings[:version_options][:cascade] if self.class.settings[:version_options] && self.class.settings[:version_options].has_key?(:cascade)
+      true
     end
 
     reset!
@@ -507,7 +528,7 @@ module Grape
         not_allowed_methods = %w(GET PUT POST DELETE PATCH HEAD) - methods
         not_allowed_methods << "OPTIONS" if self.class.settings[:do_not_route_options]
         not_allowed_methods.each do |bad_method|
-          @route_set.add_route( proc { [405, { 'Allow' => allow_header }, []]}, {
+          @route_set.add_route( proc { [405, { 'Allow' => allow_header, 'Content-Type' => 'text/plain' }, []]}, {
             :path_info      => path_info,
             :request_method => bad_method
           })
